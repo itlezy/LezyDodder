@@ -25,7 +25,7 @@ public class AutoJoinDHT {
 	@Scheduled(fixedDelay = 60 * 1000, initialDelay = 10 * 1000)
 	public void doJob() {
 		if (handler.NODES_QUEUE.isEmpty()) {
-			log.info("本地 DHT 节点数为0，自动重新加入 DHT 网络中...");
+			log.info("The number of local DHT nodes is 0 and automatically rejoins the DHT network...");
 			handler.joinDHT();
 		}
 		//dhtServer.saveBloomFilter();

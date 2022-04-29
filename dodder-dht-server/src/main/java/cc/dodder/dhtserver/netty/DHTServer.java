@@ -53,6 +53,7 @@ public class DHTServer {
 	public static final List<InetSocketAddress> BOOTSTRAP_NODES = new ArrayList<>(Arrays.asList(
 			new InetSocketAddress("router.bittorrent.com", 6881),
 			new InetSocketAddress("dht.transmissionbt.com", 6881),
+			new InetSocketAddress("router.bitcomet.com", 6881),
 			new InetSocketAddress("router.utorrent.com", 6881),
 			new InetSocketAddress("dht.aelitis.com", 6881)));
 

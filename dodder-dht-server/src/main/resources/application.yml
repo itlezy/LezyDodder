@@ -1,5 +1,6 @@
 server:
   port: 8766
+
 ## netty服务器端口
 netty:
   udp:

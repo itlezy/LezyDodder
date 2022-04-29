@@ -1,6 +1,7 @@
 package cc.dodder.dhtserver.netty.handler;
 
 import cc.dodder.common.entity.DownloadMsgInfo;
+import cc.dodder.common.util.ByteUtil;
 import cc.dodder.common.util.CRC64;
 import cc.dodder.common.util.JSONUtil;
 import cc.dodder.common.util.NodeIdUtil;
@@ -14,6 +15,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.socket.DatagramPacket;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.io.FileUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.stream.function.StreamBridge;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -21,6 +23,8 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.io.File;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
@@ -28,11 +32,24 @@ import java.util.HashMap;
 import java.util.Map;
 
 /***
- * 参见 Bittorrent 协议：
+ * See Bittorrent protocol:
  * http://www.bittorrent.org/beps/bep_0005.html
  *
  * @author Mr.Xu
- **/
+**/
+
+/**
+  https://sinister.ly/Thread-Indexing-torrents-from-bittorrent-DHT
+
+  The BitTorrent DHT BEP-0005 implementation supports a few query methods:
+    - ping - retrieves the queried node's id
+    - find_node - used to find a node based on its id
+    - get_peers - used to get peers by torrent hash
+    - announce_peer - tells other nodes that the current node is downloading a torrent. (this is usefull since it adds the calling node to the DHT)
+
+  Since we know that the *announce_peer* query *broadcasts* a message that some node is downloading something, we can simply log these requests and have a never ending list of valid torrent hashes.
+*/
+
 @Slf4j
 @Component
 @ChannelHandler.Sharable
@@ -79,8 +96,13 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 					onResponse(msg, packet.sender());
 				}
 			} catch (Exception e) {
-				System.out.println(JSONUtil.toJSONString(msg));
-				System.out.println(new String(buff));
+                //TODO: why not logger here?
+                try {
+                    System.err.println(JSONUtil.toJSONString(msg));
+                } catch (Exception ex1) {
+                    System.err.println(msg);
+                }
+				System.err.println(new String(buff));
 				e.printStackTrace();
 			}
 		});
@@ -123,7 +145,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 回复 ping 请求
+	 * Reply to ping request
 	 * Response = {"t":"aa", "y":"r", "r": {"id":"自身节点ID"}}
 	 *
 	 * @param t
@@ -137,7 +159,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 回复 find_node 请求, 由于是模拟的 DHT 节点，所以直接回复一个空的 node 集合即可
+	 * Reply to the find_node request. Since it is a simulated DHT node, you can directly reply to an empty node set
 	 * Response = {"t":"aa", "y":"r", "r": {"id":"0123456789abcdefghij", "nodes": "def456..."}}
 	 *
 	 * @param t
@@ -148,11 +170,11 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("nodes", new byte[]{});
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		//log.info("response find_node[{}]", sender);
+		log.info("response find_node[{}]", sender);
 	}
 
 	/**
-	 * 回复 get_peers 请求，必须回复，不然收不到 announce_peer 请求
+	 * Reply to the get_peers request, you must reply, otherwise the announce_peer request will not be received
 	 * Response with closest nodes = {"t":"aa", "y":"r", "r": {"id":"abcdefghij0123456789", "token":"aoeusnth", "nodes": "def456..."}}
 	 *
 	 * @param t
@@ -165,21 +187,21 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("id", NodeIdUtil.getNeighbor(DHTServer.SELF_NODE_ID, info_hash));
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		//log.info("response get_peers[{}]", sender);
+		log.info("response get_peers[{}]", sender);
 	}
 
 	/**
-	 * 回复 announce_peer 请求，该请求中包含了对方正在下载的 torrent 的 info_hash 以及 端口号
+	 * Reply to the announce_peer request, which contains the info_hash and port number of the torrent the other party is downloading
 	 * Response = {"t":"aa", "y":"r", "r": {"id":"mnopqrstuvwxyz123456"}}
 	 *
 	 * @param t
-	 * @param a      请求参数 a：
+	 * @param a      Request parameter a:
 	 *               {
 	 *               "id" : "",
-	 *               "implied_port": <0 or 1>,    //为1时表示当前自身的端口就是下载端口
+	 *               "implied_port": <0 or 1>,    //When it is 1, it means that the current own port is the download port
 	 *               "info_hash" : "<20-byte infohash of target torrent>",
 	 *               "port" : ,
-	 *               "token" : "" //get_peer 中回复的 token，用于检测是否一致
+	 *               "token" : "" //get_peer The token replied in , used to check whether it is consistent
 	 *               }
 	 * @param sender
 	 */
@@ -201,37 +223,48 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("id", nodeId);
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		CRC64 crc = new CRC64();
-		crc.reset();
-		crc.update(info_hash);
-		String crc64 = Long.toHexString(crc.getValue());
-		//check exists
-		if (redisTemplate.hasKey(crc64)) {
-			return;
-		}
 
-		//log.error("info_hash[AnnouncePeer] : {}:{} - {}", sender.getHostString(), port, ByteUtil.byteArrayToHex(info_hash));
-		//send to kafka
-		streamBridge.send("download-out", JSONUtil.toJSONString(new DownloadMsgInfo(sender.getHostString(), port, info_hash, crc64)).getBytes());
+		log.info("info_hash[AnnouncePeer] : {}:{} - {}", sender.getHostString(), port, ByteUtil.byteArrayToHex(info_hash));
+
+		//TODO here you can bring back Redis and Kafka if you wish, me I'm going to use https://github.com/webtorrent/webtorrent-cli to take it from here
+		processUniqueToFile(info_hash);
+	}
+
+	private void processUniqueToFile(byte[] info_hash) {
+		String info_hash_s = ByteUtil.byteArrayToHex(info_hash);
+		String dName = "/tmp/" + info_hash_s;
+		File fHash = new File(dName);
+
+		if (!fHash.exists()) {
+			try {
+				FileUtils.forceMkdir(fHash);
+			} catch (IOException e) {
+                log.warn("Writing file", dName);
+			}
+		}
 	}
 
 	/**
-	 * 处理对方响应内容，由于我们只主动给对方发送了 find_node 请求，所以只会收到 find_node 的回复进行解析即可
-	 * 解析出响应的节点列表再次给这些节点发送 find_node 请求，即可无限扩展与新的节点保持通讯（即把自己的节点加入到对方的桶里，
-	 * 欺骗对方让对方给自己发送 announce_peer 请求，这样一来我们就可以抓取 DHT 网络中别人正在下载的种子文件信息）
+	 * Process the response content of the other party. Since we only actively send the find_node request to the other party, we will only receive the reply of find_node for analysis.
+	 * After parsing the node list of the response, send the find_node request to these nodes again, which can expand infinitely and maintain communication with new nodes (that is, add your own node to the other party's bucket,
+	 * Trick the other party to send the announce_peer request to us, so that we can grab the torrent file information that others are downloading in the DHT network)
 	 *
 	 * @param map
 	 * @param sender
 	 */
 	private void onResponse(Map<String, ?> map, InetSocketAddress sender) throws UnknownHostException {
+		log.debug("onResponse..");
+
 		//transaction id
 		byte[] t = (byte[]) map.get("t");
-		//由于在我们发送查询 DHT 节点请求时，构造的查询 transaction id 为字符串 find_node（见 findNode 方法），所以根据字符串判断响应请求即可
+
+		// Since when we send the query DHT node request, the constructed query transaction id is the string find_node (see the findNode method), so the response request can be judged according to the string
 		String type = new String(t);
+
 		if ("find_node".equals(type)) {
 			if (map.containsKey("r"))
 				resolveNodes((Map) map.get("r"));
-			else if (map.containsKey("e"))			//变种协议？
+			else if (map.containsKey("e"))			//Variant protocol?
 				resolveNodes((Map) map.get("e"));
 		} else if ("ping".equals(type)) {
 
@@ -243,7 +276,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 解析响应内容中的 DHT 节点信息
+	 * Parse the DHT node information in the response content
 	 *
 	 * @param r
 	 */
@@ -281,7 +314,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 发送查询 DHT 节点请求
+	 * Send query DHT node request
 	 *
 	 * @param address 请求地址
 	 * @param nid     请求节点 ID
@@ -335,7 +368,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 查询 DHT 节点线程，用于持续获取新的 DHT 节点
+	 * Query DHT node thread for continuous acquisition of new DHT nodes
 	 *
 	 * @date 2019/2/17
 	 **/
