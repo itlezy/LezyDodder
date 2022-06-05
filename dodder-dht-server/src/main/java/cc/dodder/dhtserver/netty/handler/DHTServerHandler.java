@@ -73,7 +73,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	@Override
 	public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
 		super.exceptionCaught(ctx, cause);
-		cause.printStackTrace();
+		System.err.println("*** NETERR *** " + (cause != null ? cause.getMessage() : " - - -"));
 	}
 
 	@Override
@@ -90,26 +90,25 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 
 				byte[] y = (byte[]) msg.get("y");
 
-				if (y.length > 0 && y[0] == 'q') {            //请求 Queries
+				if (y.length > 0 && y[0] == 'q') {            //Request Queries
 					onQuery(msg, packet.sender());
-				} else if (y.length > 0 && y[0] == 'r') {     //回复 Responses
+				} else if (y.length > 0 && y[0] == 'r') {     //Reply Responses
 					onResponse(msg, packet.sender());
 				}
 			} catch (Exception e) {
                 //TODO: why not logger here?
                 try {
-                    System.err.println(JSONUtil.toJSONString(msg));
+                    System.err.println("*** SYSERR *** " + JSONUtil.toJSONString(msg));
                 } catch (Exception ex1) {
-                    System.err.println(msg);
+                    System.err.println("*** SYSERR *** " + msg);
                 }
-				System.err.println(new String(buff));
-				e.printStackTrace();
+				if (buff != null) { System.err.println("*** SYSERR *** " + new String(buff)); }
 			}
 		});
 	}
 
 	/**
-	 * 解析查询请求
+	 * Parse the query request
 	 *
 	 * @param map
 	 * @param sender
@@ -120,13 +119,14 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		} else {
 			args.get().clear();
 		}
-		//transaction id 会话ID
+		//transaction id session ID
 		byte[] t = (byte[]) map.get("t");
 		//query name: ping, find node, get_peers, announce_peer
 		String q = new String((byte[]) map.get("q"));
 		//query params
 		Map<String, ?> a = (Map<String, ?>) map.get("a");
-		//log.info("on query, query name is {}", q);
+		log.debug("on query, query name is {}", q);
+
 		switch (q) {
 			case "ping"://ping Query = {"t":"aa", "y":"q", "q":"ping", "a":{"id":"发送者ID"}}
 				responsePing(t, (byte[]) a.get("id"), sender);
@@ -155,7 +155,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("id", NodeIdUtil.getNeighbor(DHTServer.SELF_NODE_ID, nid));
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		//log.info("response ping[{}]", sender);
+		log.debug("response ping[{}]", sender);
 	}
 
 	/**
@@ -170,7 +170,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("nodes", new byte[]{});
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		log.info("response find_node[{}]", sender);
+		log.debug("response find_node[{}]", sender);
 	}
 
 	/**
@@ -187,7 +187,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 		args.get().put("id", NodeIdUtil.getNeighbor(DHTServer.SELF_NODE_ID, info_hash));
 		DatagramPacket packet = createPacket(t, "r", args.get(), sender);
 		dhtServer.sendKRPC(packet);
-		log.info("response get_peers[{}]", sender);
+		log.debug("response get_peers[{}]", sender);
 	}
 
 	/**
@@ -291,23 +291,22 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 			return;
 
 		for (int i = 0; i < nodes.length / 26 * 26; i += 26) {
-				//limit the node queue size
-				/*if (NODES_QUEUE.size() > 15000)
-					continue;*/
+				// limit the node queue size
+				/* if (NODES_QUEUE.size() > 15000) continue; */
 				InetAddress ip = InetAddress.getByAddress(new byte[]{nodes[i + 20], nodes[i + 21], nodes[i + 22], nodes[i + 23]});
 				InetSocketAddress address = new InetSocketAddress(ip, (0x0000FF00 & (nodes[i + 24] << 8)) | (0x000000FF & nodes[i + 25]));
 				byte[] nid = new byte[20];
 				System.arraycopy(nodes, i, nid, 0, 20);
 				NODES_QUEUE.offer(new Node(nid, address));
-				//log.info("get node address=[{}] ", address);
-
+				log.debug("get node address=[{}] ", address);
 		}
 	}
 
 	/**
-	 * 加入 DHT 网络
+	 * Join the DHT Network
 	 */
 	public void joinDHT() {
+		log.debug("joinDHT..");
 		for (InetSocketAddress addr : DHTServer.BOOTSTRAP_NODES) {
 			findNode(addr, null, DHTServer.SELF_NODE_ID);
 		}
@@ -316,12 +315,14 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	/**
 	 * Send query DHT node request
 	 *
-	 * @param address 请求地址
-	 * @param nid     请求节点 ID
-	 * @param target  目标查询节点
+	 * @param address request address
+	 * @param nid     Request Node ID
+	 * @param target  target query node
 	 */
 	private final HashMap<String, Object> map = new HashMap<>();
 	private void findNode(InetSocketAddress address, byte[] nid, byte[] target) {
+		log.debug("findNode {}", target);
+
 		map.clear();
 		map.put("target", target);
 		if (nid != null)
@@ -331,6 +332,8 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	private void requestGetPeers(InetSocketAddress address, byte[] nid, byte[] info_hash) {
+		log.debug("requestGetPeers {}", address);
+
 		map.clear();
 		map.put("id", NodeIdUtil.getNeighbor(DHTServer.SELF_NODE_ID, nid));
 		map.put("info_hash", info_hash);
@@ -339,7 +342,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	}
 
 	/**
-	 * 构造 KRPC 协议数据
+	 * Construct KRPC protocol data
 	 *
 	 * @param t
 	 * @param y
@@ -386,7 +389,7 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 						}
 					} catch (Exception e) {
 					}
-					Thread.sleep(50);
+					Thread.sleep(100);
 				}
 			} catch (InterruptedException e) {
 			}
@@ -402,5 +405,4 @@ public class DHTServerHandler extends SimpleChannelInboundHandler<DatagramPacket
 	public void stop() {
 		findNodeTask.interrupt();
 	}
-
 }
